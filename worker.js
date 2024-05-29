@@ -57,49 +57,118 @@ async function parseResponseByContentType(response, contentType) {
 }
 
 async function handleRequest(request) {
-  // Extracts the path from the request URL
-  const path = new URL(request.url).pathname;
-  // By default, the URL is set to 'https://bento.me'
-  // appended with the path
-  let url = 'https://bento.me' + path;
+  const url = new URL(request.url);
+  const path = url.pathname;
 
-  // If the path includes 'v1', the URL is changed to
-  // 'https://api.bento.me' appended with the path
-  if (path.includes('v1')) {
-    url = 'https://api.bento.me' + path;
-  }
-
-  // If the URL is 'https://bento.me/' the URL is changed to
-  // 'https://bento.me/' appended with the BENTO_USERNAME
-  if (url === 'https://bento.me/') {
-    url = 'https://bento.me/' + BENTO_USERNAME;
-  }
-
-  // Basic headers for the fetch request are defined
+  // 基本的请求头部定义
   let headers = {
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Methods': 'GET,HEAD,POST,OPTIONS',
   };
 
-  // The URL is fetched with the defined headers
-  const response = await fetch(url, { headers });
+  // 检查是否是特定文件请求
+  if (isDirectFileRequest(path)) {
+    try {
+      const object = await R2_BUCKET.get(path.substring(1)); // 去掉路径中的首个斜杠
+      if (!object) {
+        console.log("No object found in R2.");
+        return new Response('File not found', { status: 404 });
+      }
 
-  // The content type is extracted from the response headers
-  const contentType = response.headers.get('content-type');
+      console.log("Object found:", object);
+      console.log("HTTP Metadata:", object.httpMetadata);
 
-  // The response is parsed based on its content type
-  let results = await parseResponseByContentType(response, contentType);
-
-  // If the results are not an ArrayBuffer
-  // all calls to the bento API are replaced with our BASE_URL
-  // This is a workaround to fix CORS errors that occur otherwise
-  if (!(results instanceof ArrayBuffer)) {
-    results = results.replaceAll('https://api.bento.me', BASE_URL);
+      const arrayBuffer = await object.arrayBuffer();
+      const contentType = object.httpMetadata?.contentType || determineContentType(path);
+      return new Response(arrayBuffer, {
+        headers: { 'Content-Type': contentType }
+      });
+    } catch (error) {
+      console.error("Error fetching file:", error);
+      return new Response(`Error fetching file: ${error.message}`, { status: 500 });
+    }
   }
 
-  // The content type is added to the headers
-  headers['content-type'] = contentType;
+  // 特殊处理 /v1/users/me
+  if (path === '/v1/users/me') {
+    const jsonBody = JSON.stringify({
+      "status": 401,
+      "code": "UNKNOWN_ERROR",
+      "message": "Unauthorized"
+    });
+    return new Response(jsonBody, {
+      headers: { 'content-type': 'application/json' },
+      status: 401
+    });
+  }
 
-  // A new response is returned with the results and headers
+  // 根目录重定向到个人页面
+  if (path === '/') {
+    const targetUrl = 'https://bento.me/' + BENTO_USERNAME;
+    const response = await fetch(targetUrl, { headers });
+    const contentType = response.headers.get('content-type');
+    let results = await parseResponseByContentType(response, contentType);
+
+    // 替换策略
+    if (!(results instanceof ArrayBuffer)) {
+      results = results.replaceAll('https://api.bento.me', BASE_URL); // 修正CORS问题
+      results = results.replaceAll('pk.eyJ1IjoibXVnZWViIiwiYSI6ImNsdG5idzFrbTA0c3UycnA4OWRtbTJ6dmMifQ.Qa0vYWIbFEHuNuPpbVkdEQ', MAPBOX_TOKEN); // 替换mapbox的token，解决域名限制
+      results = results.replaceAll('flex w-full flex-col items-center bg-[#FBFBFB]', 'hidden'); // 屏蔽底部登录元素
+      results = results.replaceAll('fixed left-16 bottom-[52px] -m-1 hidden items-center space-x-1 rounded-[12px] p-1 transition-colors xl:flex 2xl:space-x-2', 'hidden'); // 屏蔽底部登录元素
+    }
+
+    headers['content-type'] = contentType;
+    return new Response(results, { headers });
+  }
+
+  // 允许的资源路径检查
+  const allowedPatterns = [
+    '/v1', '/_next', '/images', '/_axiom'
+  ];
+  const isAllowed = allowedPatterns.some(pattern => path.startsWith(pattern));
+
+  if (!isAllowed) {
+    return new Response('Not Allowed', { status: 403 });
+  }
+
+  // 允许的资源路径，直接代理到 bento.me
+  const targetUrl = 'https://bento.me' + path;
+  const response = await fetch(targetUrl, { headers });
+  const contentType = response.headers.get('content-type');
+  let results = await parseResponseByContentType(response, contentType);
+
+  // 替换策略
+  if (!(results instanceof ArrayBuffer)) {
+    results = results.replaceAll('https://api.bento.me', BASE_URL); // 修正CORS问题
+    results = results.replaceAll('pk.eyJ1IjoibXVnZWViIiwiYSI6ImNsdG5idzFrbTA0c3UycnA4OWRtbTJ6dmMifQ.Qa0vYWIbFEHuNuPpbVkdEQ', MAPBOX_TOKEN); // 替换mapbox的token，解决域名限制
+    results = results.replaceAll('flex w-full flex-col items-center bg-[#FBFBFB]', 'hidden'); // 屏蔽底部登录元素
+    results = results.replaceAll('fixed left-16 bottom-[52px] -m-1 hidden items-center space-x-1 rounded-[12px] p-1 transition-colors xl:flex 2xl:space-x-2', 'hidden'); // 屏蔽底部登录元素
+  }
+
+  headers['content-type'] = contentType;
   return new Response(results, { headers });
+}
+
+function isDirectFileRequest(path) {
+  // 定义允许的直接文件请求路径
+  const directFileRules = [
+    '/favicon.ico',
+    '/site.webmanifest',
+    /^\/[^\/]+\.png$/  // 匹配根目录下的任意.png文件
+  ];
+
+  return directFileRules.some(rule => {
+    if (typeof rule === 'string') {
+      return path === rule;
+    } else if (rule instanceof RegExp) {
+      return rule.test(path);
+    }
+  });
+}
+
+function determineContentType(path) {
+  if (path.endsWith('.ico')) return 'image/x-icon';
+  if (path.endsWith('.webmanifest')) return 'application/manifest+json';
+  if (path.endsWith('.png')) return 'image/png';
+  return 'application/octet-stream';
 }
