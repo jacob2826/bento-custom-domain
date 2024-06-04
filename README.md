@@ -1,3 +1,8 @@
+
+![bento.me](https://global-uploads.webflow.com/6335b33630f88833a92915fc/63e91e61f16d3f5449b176ca_Open%20Graph%20Image%203.png)
+
+
+
 # bento-custom-domain
 
 基于 Cloudflare Worker 反向代理，为 bento.me 个人主页绑定自定义域名。
